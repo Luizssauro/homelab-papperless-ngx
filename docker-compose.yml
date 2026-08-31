@@ -1,0 +1,109 @@
+name: paperless-ngx
+
+services:
+  broker:
+    image: docker.io/library/redis:7.4-alpine
+    restart: unless-stopped
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  db:
+    image: docker.io/library/postgres:16
+    restart: unless-stopped
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: paperless
+      POSTGRES_USER: paperless
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD no arquivo .env}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U paperless -d paperless"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  webserver:
+    # Versao fixada na ultima release estavel (v3.1.1) para builds reproduziveis.
+    image: ghcr.io/paperless-ngx/paperless-ngx:3.1.1
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      broker:
+        condition: service_healthy
+      gotenberg:
+        condition: service_started
+      tika:
+        condition: service_started
+    ports:
+      # Somente loopback: acesso externo deve passar pelo proxy reverso.
+      - "127.0.0.1:8010:8000"
+    volumes:
+      # Caminhos de dados/midia mantidos como no setup original.
+      - D:/media/documents:/usr/src/paperless/data
+      - D:/media/documents/media:/usr/src/paperless/media
+      - ./export:/usr/src/paperless/export
+      - ./consume:/usr/src/paperless/consume
+    environment:
+      PAPERLESS_REDIS: redis://broker:6379
+      PAPERLESS_DBHOST: db
+      PAPERLESS_DBUSER: paperless
+      PAPERLESS_DBPASS: ${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD no arquivo .env}
+      PAPERLESS_DBNAME: paperless
+      USERMAP_UID: 1000
+      USERMAP_GID: 1000
+      PAPERLESS_OCR_LANGUAGES: por eng
+      PAPERLESS_OCR_LANGUAGE: por+eng
+      PAPERLESS_SECRET_KEY: ${PAPERLESS_SECRET_KEY:?defina PAPERLESS_SECRET_KEY no arquivo .env}
+      PAPERLESS_TIME_ZONE: America/Sao_Paulo
+      PAPERLESS_TIKA_ENABLED: 1
+      PAPERLESS_TIKA_GOTENBERG_ENDPOINT: http://gotenberg:3000
+      PAPERLESS_TIKA_ENDPOINT: http://tika:9998
+      PAPERLESS_URL: ${PAPERLESS_URL:?defina PAPERLESS_URL no arquivo .env}
+      # Bind mount no Windows nao propaga inotify: consumo depende de polling.
+      PAPERLESS_CONSUMER_POLLING: 30
+      PAPERLESS_CONSUMER_POLLING_RETRY_COUNT: 5
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "-o", "/dev/null", "--max-time", "5", "http://localhost:8000"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  gotenberg:
+    image: docker.io/gotenberg/gotenberg:8.7
+    restart: unless-stopped
+    # A rota chromium do gotenberg e usada para converter .eml. Nao queremos
+    # permitir conteudo externo como pixels de rastreio ou javascript.
+    command:
+      - "gotenberg"
+      - "--chromium-disable-javascript=true"
+      - "--chromium-allow-list=file:///tmp/.*"
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  tika:
+    image: docker.io/apache/tika:2.9.2.1
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+volumes:
+  redisdata:
+  pgdata:
